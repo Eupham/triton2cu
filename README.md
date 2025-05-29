@@ -34,6 +34,8 @@ After a successful build (either inplace or via install), you should be able to 
 
 If you encounter issues importing the module after building, ensure that the directory containing the compiled `.so` file is part of your Python path, or that you are running your script from a location where the module is visible (especially after an inplace build).
 
+**Note on Runtime Linking:** The `setup.py` script includes a setting (RPATH) to help the compiled extension locate necessary PyTorch C++ libraries at runtime. This should reduce `ImportError` issues related to missing shared libraries like `libc10.so` or `libtorch_cpu.so`.
+
 ## Running Benchmarks
 
 Once the CUDA extension is successfully built, you can run the benchmark script:
