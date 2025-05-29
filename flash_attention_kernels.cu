@@ -57,8 +57,8 @@ __global__ void flash_fwd_kernel(
 
     float m_i = -INFINITY; // Current max for this Q row
     float l_i = 1.0f;      // Current sum_exp for this Q row
-    float acc[D_head];     // Accumulator for O for this Q row
-    for (int d_acc = 0; d_acc < D_head; ++d_acc) {
+    float acc[KERNEL_MAX_D_HEAD];     // Accumulator for O for this Q row
+    for (int d_acc = 0; d_acc < D_head; ++d_acc) { // Initialize up to actual D_head
         acc[d_acc] = 0.0f;
     }
 
