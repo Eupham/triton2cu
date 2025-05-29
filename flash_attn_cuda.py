@@ -61,7 +61,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         # Call the C++ / CUDA forward function
         # flash_attn_forward_cuda returns [o, softmax_lse]
         # These are placeholder calls for now, actual kernel is not implemented
-        o, softmax_lse = flash_attn_cuda_kernels.flash_attn_forward_cuda(
+        o, softmax_lse = flash_attn_cuda_kernels.forward( # Corrected function name
             q, k, v, sm_scale, causal
         )
 
@@ -97,7 +97,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         # Call the C++ / CUDA backward function
         # flash_attn_backward_cuda returns [dq, dk, dv]
         # These are placeholder calls for now, actual kernel is not implemented
-        dq, dk, dv = flash_attn_cuda_kernels.flash_attn_backward_cuda(
+        dq, dk, dv = flash_attn_cuda_kernels.backward( # Corrected function name
             dout, q, k, v, o, softmax_lse, sm_scale, causal
         )
 
