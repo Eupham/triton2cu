@@ -16,10 +16,27 @@ for pth in sys.path:
 print("Attempting to import flash_attn_cuda_kernels...")
 # --- End Diagnostic Info ---
 
+_FLASH_CUDA_KERNELS_AVAILABLE = False
+try:
+    print("flash_attn_cuda.py: Attempting to import flash_attn_cuda_kernels...")
+    import flash_attn_cuda_kernels
+    print("flash_attn_cuda.py: Successfully imported flash_attn_cuda_kernels.")
+    _FLASH_CUDA_KERNELS_AVAILABLE = True
+except ImportError as e:
+    print(f"!!! flash_attn_cuda.py: FAILED to import flash_attn_cuda_kernels. !!!")
+    print(f"!!! Detailed ImportError below: !!!")
+    print(f"{e}") # Print the detailed error message
+    # Re-raise to ensure benchmark.py's try-except (for importing from this file) catches it.
+    raise
+except Exception as e_other:
+    print(f"!!! flash_attn_cuda.py: An UNEXPECTED error occurred during import of flash_attn_cuda_kernels. !!!")
+    print(f"!!! Detailed Exception: {e_other} !!!")
+    raise
+
 import torch
 # The original import line for flash_attn_cuda_kernels might be here or in benchmark.py.
 # For now, this script is where the direct import happens for the autograd.Function.
-import flash_attn_cuda_kernels 
+# The actual 'import flash_attn_cuda_kernels' is now inside the try-except block above.
 
 class FlashAttentionCUDAFunction(torch.autograd.Function):
     @staticmethod
