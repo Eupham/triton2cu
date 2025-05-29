@@ -222,16 +222,22 @@ __global__ void flash_fwd_kernel(
         }
 
         // Apply intra-tile causal mask if this is the diagonal block in a causal pass
-        // Check if the current K/V block overlaps with the Q block this thread block is processing
-        // and if q_global_idx < k_global_idx
-        if (is_causal && start_n_kv < (q_start_row_idx + KERNEL_BLOCK_M) &&  // Use define
-            (q_start_row_idx < (start_n_kv + KERNEL_BLOCK_N)) ) { // Use define
-            for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-                if ((q_start_row_idx + m) < (start_n_kv + n)) {
+        if (is_causal && start_n_kv == q_start_row_idx) {
+            for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
+                // m is threadIdx.x (row in q_tile, 0 to KERNEL_BLOCK_M-1)
+                // n is column in qk_tile_row (effectively row in k_tile, 0 to KERNEL_BLOCK_N-1)
+                // Since start_n_kv == q_start_row_idx, this simplifies global comparison to local:
+                if (m < n) { 
                     qk_tile_row[n] = -INFINITY;
                 }
             }
         }
+        // Note: If KERNEL_BLOCK_M != KERNEL_BLOCK_N, the condition m < n might not be a perfect
+        // square upper-triangular mask. The more general global comparison
+        // `if ((q_start_row_idx + m) < (start_n_kv + n))` would be needed if the above simplification
+        // is not appropriate for all KERNEL_BLOCK_M, KERNEL_BLOCK_N combinations on the diagonal.
+        // However, for start_n_kv == q_start_row_idx, (q_start_row_idx + m) < (q_start_row_idx + n) is m < n.
+        // This is standard for the diagonal block.
         
         float current_row_max_qk = -INFINITY;
         for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
