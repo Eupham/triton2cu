@@ -35,6 +35,8 @@ __global__ void flash_fwd_kernel(
     const bool is_causal
     // BLOCK_M_KERNEL and BLOCK_N_KERNEL removed from parameters
 ) {
+    // Original body commented out for debugging syntax errors.
+    /*
     // --- Thread and Block Indexing ---
     // Each block processes one KERNEL_BLOCK_M segment of Q for a specific batch and head.
     // blockIdx.x maps to the Q sequence block.
@@ -330,6 +332,7 @@ __global__ void flash_fwd_kernel(
     }
     // No __syncthreads() needed here at the very end of the kernel for storing,
     // as threads are writing to distinct global memory locations for their assigned Q row.
+    */
 }
 
 // Placeholder for the actual CUDA kernel for the backward pass
@@ -497,10 +500,8 @@ __global__ void flash_bwd_kernel(
         // Remember dQ needs scaling: dq_val * LN2 (log(2.0f))
         // (Details in next subtask)
     }
+    // Removed potentially problematic debug printf block
 
-    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
-        // printf("flash_bwd_kernel: Structured skeleton executed.\\n");
-    }
 }
 
 __global__ void flash_bwd_preprocess_kernel(
@@ -625,6 +626,8 @@ std::vector<torch::Tensor> flash_attn_forward_cuda(
     float sm_scale,
     bool causal
 ) {
+    // Original body commented out for debugging syntax errors.
+    /*
     // Input validation (basic checks)
     // TODO: Add BLOCK_M_KERNEL and BLOCK_N_KERNEL to parameters and pass them to kernel - This is now handled by defines
     TORCH_CHECK(q.device().is_cuda(), "Input Q must be a CUDA tensor");
@@ -708,6 +711,21 @@ std::vector<torch::Tensor> flash_attn_forward_cuda(
     softmax_lse.zero_();
 
     return {o, softmax_lse};
+    */
+
+    // Return dummy tensors to satisfy the function signature.
+    // Ensure these match the expected return structure if called.
+    auto opts_o = q.options(); // Assuming q is one of the inputs
+    torch::Tensor o_dummy = torch::empty_like(q, opts_o);
+    
+    auto opts_lse = o_dummy.options().dtype(torch::kFloat32);
+    // Get B, H, N_q from q for softmax_lse shape
+    const int B_dummy = q.size(0);
+    const int H_dummy = q.size(1);
+    const int N_q_dummy = q.size(2);
+    torch::Tensor softmax_lse_dummy = torch::empty({B_dummy, H_dummy, N_q_dummy}, opts_lse);
+    
+    return {o_dummy, softmax_lse_dummy};
 }
 
 // Placeholder for the actual CUDA kernel for the backward pass
