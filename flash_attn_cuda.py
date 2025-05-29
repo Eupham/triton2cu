@@ -1,5 +1,25 @@
+import sys
+import os
+
+# --- Diagnostic Info ---
+print("--- flash_attn_cuda.py: Diagnostic Info ---")
+print(f"Current Working Directory: {os.getcwd()}")
+print("Files in CWD:")
+try:
+    for item in os.listdir(os.getcwd()):
+        print(f"  - {item}")
+except Exception as e:
+    print(f"  Error listing CWD contents: {e}")
+print("Python sys.path:")
+for pth in sys.path:
+    print(f"  - {pth}")
+print("Attempting to import flash_attn_cuda_kernels...")
+# --- End Diagnostic Info ---
+
 import torch
-import flash_attn_cuda_kernels # This is the module built by setup.py
+# The original import line for flash_attn_cuda_kernels might be here or in benchmark.py.
+# For now, this script is where the direct import happens for the autograd.Function.
+import flash_attn_cuda_kernels 
 
 class FlashAttentionCUDAFunction(torch.autograd.Function):
     @staticmethod
