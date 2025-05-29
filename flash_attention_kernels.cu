@@ -141,31 +141,47 @@ __global__ void flash_fwd_kernel(
 
             float current_row_max_qk = -INFINITY;
             for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-                if (qk_tile_row[n] > current_row_max_qk) {
+                if (qk_tile_row[n] > current_row_max_qk) { // Ensure qk_tile_row[n] is not NaN
                     current_row_max_qk = qk_tile_row[n];
                 }
             }
 
-            float new_m_i = fmaxf(m_i, current_row_max_qk);
+            float new_m_i;
             __half p_ij_row[KERNEL_BLOCK_N]; // Use define
             float p_sum_numerator = 0.0f;
-            for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-                float p_val_float = exp2f(qk_tile_row[n] - new_m_i);
-                p_ij_row[n] = __float2half(p_val_float);
-                p_sum_numerator += p_val_float;
-            }
 
-            float alpha = exp2f(m_i - new_m_i);
+            if (current_row_max_qk == -INFINITY) { // Row was fully masked or all qk values were -inf
+                new_m_i = m_i; // Keep old max, or effectively -INF if first pass
+                for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
+                    p_ij_row[n] = __float2half(0.0f);
+                }
+                // p_sum_numerator remains 0.0f
+            } else {
+                new_m_i = fmaxf(m_i, current_row_max_qk);
+                for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
+                    // If qk_tile_row[n] was -INFINITY, exp2f(-INF - new_m_i) = 0 if new_m_i is finite.
+                    float p_val_float = exp2f(qk_tile_row[n] - new_m_i);
+                    p_ij_row[n] = __float2half(p_val_float);
+                    p_sum_numerator += p_val_float;
+                }
+            }
+            
+            float alpha = exp2f(m_i - new_m_i); // if new_m_i == m_i, alpha = 1.0. if new_m_i = -INF & m_i = -INF, alpha = 1.0.
+                                                // if m_i = -INF and new_m_i is finite, alpha = exp2f(-INF) = 0. Correct.
+                                                // if m_i is finite and new_m_i is finite, this is standard.
+
             for (int d_acc = 0; d_acc < D_head; ++d_acc) {
                 acc[d_acc] *= alpha;
             }
-
-            for (int d_acc = 0; d_acc < D_head; ++d_acc) {
-                float pv_sum_d = 0.0f;
-                for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-                    pv_sum_d += __half2float(p_ij_row[n]) * __half2float(v_tile[n][d_acc]);
+            
+            if (current_row_max_qk != -INFINITY) { // Only do P.V if row was not fully masked
+                for (int d_acc = 0; d_acc < D_head; ++d_acc) {
+                    float pv_sum_d = 0.0f;
+                    for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
+                        pv_sum_d += __half2float(p_ij_row[n]) * __half2float(v_tile[n][d_acc]);
+                    }
+                    acc[d_acc] += pv_sum_d;
                 }
-                acc[d_acc] += pv_sum_d;
             }
             
             l_i = l_i * alpha + p_sum_numerator;
@@ -225,48 +241,52 @@ __global__ void flash_fwd_kernel(
         // Apply intra-tile causal mask if this is the diagonal block in a causal pass
         if (is_causal && start_n_kv == q_start_row_idx) {
             for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
-                // m is threadIdx.x (row in q_tile, 0 to KERNEL_BLOCK_M-1)
-                // n is column in qk_tile_row (effectively row in k_tile, 0 to KERNEL_BLOCK_N-1)
-                // Since start_n_kv == q_start_row_idx, this simplifies global comparison to local:
                 if (m < n) { 
                     qk_tile_row[n] = -INFINITY;
                 }
             }
         }
-        // Note: If KERNEL_BLOCK_M != KERNEL_BLOCK_N, the condition m < n might not be a perfect
-        // square upper-triangular mask. The more general global comparison
-        // `if ((q_start_row_idx + m) < (start_n_kv + n))` would be needed if the above simplification
-        // is not appropriate for all KERNEL_BLOCK_M, KERNEL_BLOCK_N combinations on the diagonal.
-        // However, for start_n_kv == q_start_row_idx, (q_start_row_idx + m) < (q_start_row_idx + n) is m < n.
-        // This is standard for the diagonal block.
         
         float current_row_max_qk = -INFINITY;
         for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-            if (qk_tile_row[n] > current_row_max_qk) {
+            if (qk_tile_row[n] > current_row_max_qk) { // Ensure qk_tile_row[n] is not NaN
                 current_row_max_qk = qk_tile_row[n];
             }
         }
 
-        float new_m_i = fmaxf(m_i, current_row_max_qk);
+        float new_m_i;
         __half p_ij_row[KERNEL_BLOCK_N]; // Use define
         float p_sum_numerator = 0.0f;
-        for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-            float p_val_float = exp2f(qk_tile_row[n] - new_m_i);
-            p_ij_row[n] = __float2half(p_val_float);
-            p_sum_numerator += p_val_float;
+
+        if (current_row_max_qk == -INFINITY) { // Row was fully masked
+            new_m_i = m_i; 
+            for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
+                p_ij_row[n] = __float2half(0.0f);
+            }
+            // p_sum_numerator remains 0.0f
+        } else {
+            new_m_i = fmaxf(m_i, current_row_max_qk);
+            for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
+                float p_val_float = exp2f(qk_tile_row[n] - new_m_i);
+                p_ij_row[n] = __float2half(p_val_float);
+                p_sum_numerator += p_val_float;
+            }
         }
 
         float alpha = exp2f(m_i - new_m_i);
+        
         for (int d_acc = 0; d_acc < D_head; ++d_acc) {
             acc[d_acc] *= alpha;
         }
 
-        for (int d_acc = 0; d_acc < D_head; ++d_acc) {
-            float pv_sum_d = 0.0f;
-            for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
-                pv_sum_d += __half2float(p_ij_row[n]) * __half2float(v_tile[n][d_acc]);
+        if (current_row_max_qk != -INFINITY) { // Only do P.V if row was not fully masked
+            for (int d_acc = 0; d_acc < D_head; ++d_acc) {
+                float pv_sum_d = 0.0f;
+                for (int n = 0; n < KERNEL_BLOCK_N; ++n) { // Use define
+                    pv_sum_d += __half2float(p_ij_row[n]) * __half2float(v_tile[n][d_acc]);
+                }
+                acc[d_acc] += pv_sum_d;
             }
-            acc[d_acc] += pv_sum_d;
         }
         
         l_i = l_i * alpha + p_sum_numerator;
@@ -357,13 +377,13 @@ __global__ void flash_bwd_preprocess_kernel(
     const int token_block_idx = blockIdx.x;    // Index of the current token block along N_CTX
     const int bh_idx = blockIdx.y;           // Combined batch and head index
 
-    const int current_batch = bh_idx / H; // Not strictly needed for indexing if using bh_idx
-    const int current_head = bh_idx % H;   // Not strictly needed for indexing if using bh_idx
+    // const int current_batch = bh_idx / H; // Removed as unused
+    // const int current_head = bh_idx % H;   // Removed as unused
 
     // Each thread in the block handles one token from the KERNEL_PRE_BLOCK tile
-    const int m = threadIdx.x; // Local token index within the block (0 to KERNEL_PRE_BLOCK-1)
+    const int m_token_idx = threadIdx.x; // Renamed from m to avoid confusion with Q row 'm'
     
-    const int global_token_idx = token_block_idx * KERNEL_PRE_BLOCK + m;
+    const int global_token_idx = token_block_idx * KERNEL_PRE_BLOCK + m_token_idx;
 
     if (global_token_idx < N_CTX) { // Boundary check for N_CTX
         float sum_o_do = 0.0f;
