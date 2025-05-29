@@ -21,8 +21,15 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     torch::Tensor v,           // [B, H, N_kv, D_head] (saved from forward)
     torch::Tensor o,           // [B, H, N_q, D_head] (saved from forward)
     torch::Tensor softmax_lse, // [B, H, N_q] (saved from forward)
+    torch::Tensor delta,       // New
     float sm_scale,
     bool causal
+);
+
+// Declaration for the backward preprocess function (implemented in .cu file)
+torch::Tensor flash_bwd_preprocess_cuda(
+    torch::Tensor o,
+    torch::Tensor dout
 );
 
 // PYBIND11_MODULE macro defines the module structure
@@ -42,5 +49,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "backward", // Name of the function as it will be called from Python
         &flash_attn_backward_cuda, // Pointer to the C++ function
         "Flash Attention Backward Pass (CUDA)" // Docstring
+    );
+    // New binding for the preprocess backward function:
+    m.def(
+        "preprocess_backward",
+        &flash_bwd_preprocess_cuda,
+        "Flash Attention Backward Preprocess (Delta Computation CUDA)"
     );
 }

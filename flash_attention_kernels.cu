@@ -12,6 +12,7 @@
 #define KERNEL_BLOCK_M 64
 #define KERNEL_BLOCK_N 64
 #define KERNEL_MAX_D_HEAD 128 // Max head dimension supported by shared memory
+#define KERNEL_PRE_BLOCK 128  // Tile size for N_CTX in preprocess kernel
 
 __global__ void flash_fwd_kernel(
     const __half* __restrict__ q_ptr,    // Query tensor [B, H, N_q, D_head]
@@ -305,6 +306,143 @@ __global__ void flash_fwd_kernel(
     // as threads are writing to distinct global memory locations for their assigned Q row.
 }
 
+torch::Tensor flash_bwd_preprocess_cuda(
+    torch::Tensor o,    // Output tensor from forward pass [B, H, N_CTX, D_head]
+    torch::Tensor dout  // Gradient dO [B, H, N_CTX, D_head]
+) {
+    // Input validation (basic checks)
+    TORCH_CHECK(o.device().is_cuda(), "Input O must be a CUDA tensor");
+    TORCH_CHECK(dout.device().is_cuda(), "Input dO must be a CUDA tensor");
+    TORCH_CHECK(o.is_contiguous(), "Input O must be contiguous");
+    TORCH_CHECK(dout.is_contiguous(), "Input dO must be contiguous");
+    TORCH_CHECK(o.scalar_type() == torch::kFloat16, "Input O must be FP16");
+    TORCH_CHECK(dout.scalar_type() == torch::kFloat16, "Input dO must be FP16");
+    TORCH_CHECK(o.sizes() == dout.sizes(), "O and dO must have the same sizes");
+
+    const int B = o.size(0);
+    const int H = o.size(1);
+    const int N_CTX = o.size(2);
+    const int D_head = o.size(3);
+
+    // Allocate the output Delta tensor: [B, H, N_CTX], dtype float32
+    auto delta_options = o.options().dtype(torch::kFloat32);
+    torch::Tensor delta = torch::empty({B, H, N_CTX}, delta_options);
+
+    // Kernel launch configuration
+    dim3 threads(KERNEL_PRE_BLOCK); 
+    dim3 blocks(
+        (N_CTX + KERNEL_PRE_BLOCK - 1) / KERNEL_PRE_BLOCK, 
+        B * H                                             
+    );
+
+    // Get data pointers
+    const __half* o_ptr_in = reinterpret_cast<const __half*>(o.data_ptr()); // Renamed to avoid conflict
+    const __half* do_ptr_in = reinterpret_cast<const __half*>(dout.data_ptr()); // Renamed to avoid conflict
+    float* delta_ptr_out = delta.data_ptr<float>(); // Renamed to avoid conflict
+
+    // Get current CUDA stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    // Launch the kernel
+    flash_bwd_preprocess_kernel<<<blocks, threads, 0, stream>>>(
+        o_ptr_in, do_ptr_in, delta_ptr_out,
+        B, H, N_CTX, D_head
+    );
+
+    // Check for kernel launch errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Kernel Launch Error in flash_bwd_preprocess_cuda: %s\n", cudaGetErrorString(err));
+        // Consider throwing an exception here for PyTorch to catch
+        TORCH_CHECK(false, "CUDA kernel launch failed in flash_bwd_preprocess_cuda: ", cudaGetErrorString(err));
+    }
+
+    return delta;
+}
+
+// Placeholder for the actual CUDA kernel for the backward pass
+// This kernel would perform the core Flash Attention backward computation.
+__global__ void flash_bwd_kernel(
+    const __half* __restrict__ dout_ptr,
+    const __half* __restrict__ q_ptr,
+    const __half* __restrict__ k_ptr,
+    const __half* __restrict__ v_ptr,
+    const __half* __restrict__ o_ptr,
+    const float* __restrict__ softmax_lse_ptr, // M from forward
+    const float* __restrict__ delta_ptr,       // D from preprocess (New)
+    __half* __restrict__ dq_ptr,
+    __half* __restrict__ dk_ptr,
+    __half* __restrict__ dv_ptr,
+    const int B, const int H, const int N_q, const int N_kv, const int D_head,
+    const float sm_scale,
+    const bool is_causal
+    // Potentially KERNEL_BLOCK_M/N defines if they become template/macro args for bwd too
+) {
+    // Kernel body remains placeholder for now
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+        // printf("CUDA flash_bwd_kernel: Placeholder executed (with delta_ptr).\n");
+    }
+    // This is a placeholder. A full implementation is complex.
+    // It would involve:
+    // 1. Recomputing attention scores (or using saved ones if memory allows, though Flash Attention aims to avoid this).
+    // 2. Calculating dP = dO V^T.
+    // 3. Calculating dS = P * (dP - sum(P * dP, dim=-1)).
+    // 4. Calculating dQ = dS K.
+    // 5. Calculating dK = dS^T Q.
+    // 6. Calculating dV = P^T dO.
+    // All while handling tiling and shared memory.
+}
+
+__global__ void flash_bwd_preprocess_kernel(
+    const __half* __restrict__ o_ptr,    // Input O [B, H, N_CTX, D_head]
+    const __half* __restrict__ do_ptr,   // Input dO [B, H, N_CTX, D_head]
+    float* __restrict__ delta_ptr,       // Output Delta [B, H, N_CTX]
+    const int B,
+    const int H,
+    const int N_CTX,
+    const int D_head
+) {
+    // Grid: gridDim.x = (N_CTX + KERNEL_PRE_BLOCK - 1) / KERNEL_PRE_BLOCK
+    //       gridDim.y = B * H
+    // Block: blockDim.x = KERNEL_PRE_BLOCK (each thread handles one token in the block)
+    //        blockDim.y = 1
+    //        blockDim.z = 1
+
+    const int token_block_idx = blockIdx.x;    // Index of the current token block along N_CTX
+    const int bh_idx = blockIdx.y;           // Combined batch and head index
+
+    const int current_batch = bh_idx / H; // Not strictly needed for indexing if using bh_idx
+    const int current_head = bh_idx % H;   // Not strictly needed for indexing if using bh_idx
+
+    // Each thread in the block handles one token from the KERNEL_PRE_BLOCK tile
+    const int m = threadIdx.x; // Local token index within the block (0 to KERNEL_PRE_BLOCK-1)
+    
+    const int global_token_idx = token_block_idx * KERNEL_PRE_BLOCK + m;
+
+    if (global_token_idx < N_CTX) { // Boundary check for N_CTX
+        float sum_o_do = 0.0f;
+
+        // Base pointers for O and dO for the current batch, head, and token
+        // Flat index calculation:
+        // offset for batch-head: bh_idx * (N_CTX * D_head)
+        // offset for token: global_token_idx * D_head
+        int o_do_token_offset = bh_idx * N_CTX * D_head + global_token_idx * D_head;
+        
+        const __half* current_o_token_ptr = o_ptr + o_do_token_offset;
+        const __half* current_do_token_ptr = do_ptr + o_do_token_offset;
+
+        // Sum over D_head dimension
+        for (int d = 0; d < D_head; ++d) {
+            sum_o_do += __half2float(current_o_token_ptr[d]) * __half2float(current_do_token_ptr[d]);
+        }
+
+        // Store the result in Delta tensor
+        // Delta is [B, H, N_CTX]
+        // Flat index for Delta: bh_idx * N_CTX + global_token_idx
+        delta_ptr[bh_idx * N_CTX + global_token_idx] = sum_o_do;
+    }
+}
+
 std::vector<torch::Tensor> flash_attn_forward_cuda(
     torch::Tensor q,         // [B, H, N_q, D_head]
     torch::Tensor k,         // [B, H, N_kv, D_head]
@@ -436,7 +574,8 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     torch::Tensor k,           // [B, H, N_kv, D_head] (saved from forward)
     torch::Tensor v,           // [B, H, N_kv, D_head] (saved from forward)
     torch::Tensor o,           // [B, H, N_q, D_head] (saved from forward)
-    torch::Tensor softmax_lse, // [B, H, N_q] (saved from forward)
+    torch::Tensor softmax_lse, // M
+    torch::Tensor delta,       // D (New)
     float sm_scale,
     bool causal
 ) {
@@ -447,6 +586,7 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     TORCH_CHECK(v.device().is_cuda(), "Input V must be a CUDA tensor");
     TORCH_CHECK(o.device().is_cuda(), "Input O must be a CUDA tensor");
     TORCH_CHECK(softmax_lse.device().is_cuda(), "Input softmax_lse must be a CUDA tensor");
+    TORCH_CHECK(delta.device().is_cuda(), "Input delta must be a CUDA tensor");
 
     TORCH_CHECK(dout.is_contiguous(), "Input dout must be contiguous");
     TORCH_CHECK(q.is_contiguous(), "Input Q must be contiguous");
@@ -454,6 +594,7 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     TORCH_CHECK(v.is_contiguous(), "Input V must be contiguous");
     TORCH_CHECK(o.is_contiguous(), "Input O must be contiguous");
     TORCH_CHECK(softmax_lse.is_contiguous(), "Input softmax_lse must be contiguous");
+    TORCH_CHECK(delta.is_contiguous(), "Input delta must be contiguous");
 
     TORCH_CHECK(dout.scalar_type() == torch::kFloat16, "Input dout must be FP16");
     TORCH_CHECK(q.scalar_type() == torch::kFloat16, "Input Q must be FP16");
@@ -461,6 +602,10 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     TORCH_CHECK(v.scalar_type() == torch::kFloat16, "Input V must be FP16");
     TORCH_CHECK(o.scalar_type() == torch::kFloat16, "Input O must be FP16");
     TORCH_CHECK(softmax_lse.scalar_type() == torch::kFloat32, "Input softmax_lse must be FP32");
+    TORCH_CHECK(delta.scalar_type() == torch::kFloat32, "Input delta must be FP32");
+    // Add size checks for delta: [B, H, N_q]
+    TORCH_CHECK(delta.size(0) == q.size(0) && delta.size(1) == q.size(1) && delta.size(2) == q.size(2),
+                "Delta tensor dimensions must match [B, H, N_q]");
 
 
     const int B = q.size(0);
@@ -475,34 +620,31 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     torch::Tensor dv = torch::empty_like(v);
 
     // Define block and grid dimensions (placeholders, require tuning)
+    // These would need to be defined based on KERNEL_BLOCK_M_BWD, KERNEL_BLOCK_N_BWD if we had them
     dim3 threads(32); // Small placeholder
     dim3 blocks(1, H, B); // Minimal placeholder for now
 
     // Get data pointers
-    const __half* dout_ptr = reinterpret_cast<const __half*>(dout.data_ptr());
-    const __half* q_ptr = reinterpret_cast<const __half*>(q.data_ptr());
-    const __half* k_ptr = reinterpret_cast<const __half*>(k.data_ptr());
-    const __half* v_ptr = reinterpret_cast<const __half*>(v.data_ptr());
-    const __half* o_ptr = reinterpret_cast<const __half*>(o.data_ptr());
-    const float* softmax_lse_ptr = softmax_lse.data_ptr<float>();
+    const __half* dout_ptr_in = reinterpret_cast<const __half*>(dout.data_ptr());
+    const __half* q_ptr_in = reinterpret_cast<const __half*>(q.data_ptr());
+    const __half* k_ptr_in = reinterpret_cast<const __half*>(k.data_ptr());
+    const __half* v_ptr_in = reinterpret_cast<const __half*>(v.data_ptr());
+    const __half* o_ptr_in = reinterpret_cast<const __half*>(o.data_ptr());
+    const float* softmax_lse_ptr_in = softmax_lse.data_ptr<float>();
+    const float* delta_ptr_in = delta.data_ptr<float>(); // New pointer
 
-    __half* dq_ptr = reinterpret_cast<__half*>(dq.data_ptr());
-    __half* dk_ptr = reinterpret_cast<__half*>(dk.data_ptr());
-    __half* dv_ptr = reinterpret_cast<__half*>(dv.data_ptr());
-
-    // Launch the CUDA kernel
-    // cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    // flash_bwd_kernel<<<blocks, threads, 0, stream>>>(
-    //     dout_ptr, q_ptr, k_ptr, v_ptr, o_ptr, softmax_lse_ptr,
-    //     dq_ptr, dk_ptr, dv_ptr,
-    //     B, H, N_q, N_kv, D_head,
-    //     sm_scale, causal
-    // );
+    __half* dq_ptr_out = reinterpret_cast<__half*>(dq.data_ptr());
+    __half* dk_ptr_out = reinterpret_cast<__half*>(dk.data_ptr());
+    __half* dv_ptr_out = reinterpret_cast<__half*>(dv.data_ptr());
+    
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    
+    // Update kernel launch call to include delta_ptr
     flash_bwd_kernel<<<blocks, threads, 0, stream>>>(
-        dout_ptr, q_ptr, k_ptr, v_ptr, o_ptr, softmax_lse_ptr,
-        dq_ptr, dk_ptr, dv_ptr,
-        B, H, N_q, N_kv, D_head,
+        dout_ptr_in, q_ptr_in, k_ptr_in, v_ptr_in, o_ptr_in, softmax_lse_ptr_in,
+        delta_ptr_in, // Pass new delta_ptr
+        dq_ptr_out, dk_ptr_out, dv_ptr_out,
+        B, H, N_q, N_kv, D_head, 
         sm_scale, causal
     );
     cudaError_t err_bwd = cudaGetLastError();

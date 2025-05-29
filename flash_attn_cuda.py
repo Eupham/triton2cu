@@ -90,18 +90,47 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
             # Consider casting: dout = dout.to(torch.float16)
             raise ValueError("dout must be of dtype torch.float16")
 
-        q, k, v, o, softmax_lse = ctx.saved_tensors
+        q, k, v, o, softmax_lse = ctx.saved_tensors # o is now retrieved
         sm_scale = ctx.sm_scale
         causal = ctx.causal
 
-        # Call the C++ / CUDA backward function
-        # flash_attn_backward_cuda returns [dq, dk, dv]
-        # These are placeholder calls for now, actual kernel is not implemented
-        dq, dk, dv = flash_attn_cuda_kernels.backward( # Corrected function name
-            dout, q, k, v, o, softmax_lse, sm_scale, causal
-        )
+        # --- Add Preprocess Step ---
+        # 1. Compute delta using the preprocess_backward kernel
+        #    o and dout are inputs to this.
+        #    Make sure o is also contiguous and correct dtype if required by preprocess_backward's C++ wrapper.
+        #    The wrapper for preprocess_backward expects o and dout to be float16 and contiguous.
+        if not o.is_contiguous():
+            o = o.contiguous()
+        if o.dtype != torch.float16:
+            # This should not happen if forward pass output o is float16
+            # o = o.to(torch.float16) 
+            pass # Assuming o is already float16 from forward
 
+        print("flash_attn_cuda.py: Calling preprocess_backward...") # Diagnostic print
+        try:
+            delta = flash_attn_cuda_kernels.preprocess_backward(o, dout)
+            print("flash_attn_cuda.py: preprocess_backward returned.") # Diagnostic print
+        except Exception as e_pre:
+            print(f"!!! flash_attn_cuda.py: ERROR during preprocess_backward call: {e_pre} !!!")
+            raise
+
+        # --- Call Main Backward Kernel ---
+        # Now pass delta to the main backward function
+        print("flash_attn_cuda.py: Calling main backward...") # Diagnostic print
+        try:
+            dq, dk, dv = flash_attn_cuda_kernels.backward(
+                dout, q, k, v, o, softmax_lse, 
+                delta, # Pass the newly computed delta
+                sm_scale, causal
+            )
+            print("flash_attn_cuda.py: main backward returned.") # Diagnostic print
+        except Exception as e_main:
+            print(f"!!! flash_attn_cuda.py: ERROR during main backward call: {e_main} !!!")
+            raise
+            
         # Gradients for q, k, v. No gradients for sm_scale, causal.
+        # The forward inputs were: q, k, v, sm_scale, causal
+        # So we need to return grads for these 5.
         return dq, dk, dv, None, None
 
 # Convenience wrapper function
