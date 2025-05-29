@@ -13,6 +13,12 @@
 #define KERNEL_BLOCK_N 64
 #define KERNEL_MAX_D_HEAD 128 // Max head dimension supported by shared memory
 #define KERNEL_PRE_BLOCK 128  // Tile size for N_CTX in preprocess kernel
+// Backward pass tile sizes from Triton _attention.backward method
+#define KERNEL_BLOCK_M1_BWD 32  // For dK/dV Q tile processing height
+#define KERNEL_BLOCK_N1_BWD 128 // For dK/dV K/V tile height (also output tile height for dK, dV)
+#define KERNEL_BLOCK_M2_BWD 128 // For dQ Q tile processing height (also output tile height for dQ)
+#define KERNEL_BLOCK_N2_BWD 32  // For dQ K/V tile processing height
+#define KERNEL_BLK_SLICE_FACTOR_BWD 2 // From Triton
 
 __global__ void flash_fwd_kernel(
     const __half* __restrict__ q_ptr,    // Query tensor [B, H, N_q, D_head]
@@ -329,26 +335,176 @@ __global__ void flash_fwd_kernel(
 // Placeholder for the actual CUDA kernel for the backward pass
 // This kernel would perform the core Flash Attention backward computation.
 __global__ void flash_bwd_kernel(
-    const __half* __restrict__ dout_ptr,
-    const __half* __restrict__ q_ptr,
-    const __half* __restrict__ k_ptr,
-    const __half* __restrict__ v_ptr,
-    const __half* __restrict__ o_ptr,
-    const float* __restrict__ softmax_lse_ptr, // M from forward
-    const float* __restrict__ delta_ptr,       // D from preprocess (New)
-    __half* __restrict__ dq_ptr,
-    __half* __restrict__ dk_ptr,
-    __half* __restrict__ dv_ptr,
-    const int B, const int H, const int N_q, const int N_kv, const int D_head,
-    const float sm_scale,
-    const bool is_causal
-    // Potentially KERNEL_BLOCK_M/N defines if they become template/macro args for bwd too
+    const __half* __restrict__ dout_ptr,         // [B, H, N_q, D_head]
+    const __half* __restrict__ q_ptr,            // [B, H, N_q, D_head]
+    const __half* __restrict__ k_prescaled_ptr,  // [B, H, N_kv, D_head], pre-scaled K
+    const __half* __restrict__ v_ptr,            // [B, H, N_kv, D_head]
+    const __half* __restrict__ o_ptr,            // [B, H, N_q, D_head]
+    const float* __restrict__ softmax_lse_ptr,  // [B, H, N_q] (M)
+    const float* __restrict__ delta_ptr,        // [B, H, N_q] (D)
+    __half* __restrict__ dq_ptr,                 // Output dQ [B, H, N_q, D_head]
+    __half* __restrict__ dk_ptr,                 // Output dK [B, H, N_kv, D_head]
+    __half* __restrict__ dv_ptr,                 // Output dV [B, H, N_kv, D_head]
+    const int B,
+    const int H,
+    const int N_q,  // Sequence length for Q, O, dO, dQ, LSE, Delta
+    const int N_kv, // Sequence length for K, V, dK, dV
+    const int D_head,
+    const float sm_scale, // Original sm_scale, not the 1/ln(2) version
+    const bool is_causal  // Note: Triton _attn_bwd MASK is True/False based on section
 ) {
-    // Kernel body remains placeholder for now
-    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
-        // printf("CUDA flash_bwd_kernel: Placeholder executed (with delta_ptr).\n");
+    // --- Thread and Block Indexing ---
+    // Triton _attn_bwd launch grid: (N_CTX // BLOCK_N1, 1, BATCH * N_HEAD)
+    // pid = tl.program_id(0) -> blockIdx.x (iterates along N_CTX, N_q or N_kv, by tiles)
+    // bhid = tl.program_id(2) -> blockIdx.z (batch * head index)
+    // (Using blockIdx.z for bhid as gridDim.y is 1 in Triton launch)
+
+    const int seq_tile_idx = blockIdx.x; // Iterates N_CTX in tiles of KERNEL_BLOCK_N1_BWD (for dK/dV)
+                                         // or tiles of KERNEL_BLOCK_M2_BWD (for dQ)
+    const int bh_idx = blockIdx.z;
+
+    // const int current_batch = bh_idx / H; // If needed
+    // const int current_head = bh_idx % H;  // If needed
+
+    // --- Strides (assuming contiguous B,H,N,D layout) ---
+    const long stride_bh_N_D = (long)N_q * D_head; // Stride for (B*H) dim for Q-like tensors
+    const long stride_N_D = D_head;                // Stride for N_q dim for Q-like tensors
+    
+    const long stride_bh_Nkv_D = (long)N_kv * D_head; // Stride for (B*H) dim for K/V-like
+    const long stride_Nkv_D = D_head;                 // Stride for N_kv dim for K/V-like
+
+    const long stride_bh_N = N_q; // Stride for (B*H) dim for LSE/Delta
+
+    // --- Base Pointers for current Batch & Head ---
+    // (Example for Q, others follow similar pattern)
+    const __half* q_bh_ptr = q_ptr + bh_idx * stride_bh_N_D;
+    const __half* k_prescaled_bh_ptr = k_prescaled_ptr + bh_idx * stride_bh_Nkv_D;
+    const __half* v_bh_ptr = v_ptr + bh_idx * stride_bh_Nkv_D;
+    const __half* dout_bh_ptr = dout_ptr + bh_idx * stride_bh_N_D;
+    const __half* o_bh_ptr = o_ptr + bh_idx * stride_bh_N_D;
+    const float* lse_bh_ptr = softmax_lse_ptr + bh_idx * stride_bh_N;
+    const float* delta_bh_ptr = delta_ptr + bh_idx * stride_bh_N;
+
+    __half* dq_bh_ptr = dq_ptr + bh_idx * stride_bh_N_D;
+    __half* dk_bh_ptr = dk_ptr + bh_idx * stride_bh_Nkv_D;
+    __half* dv_bh_ptr = dv_ptr + bh_idx * stride_bh_Nkv_D;
+
+    // --- Shared Memory Declarations ---
+    // For dK/dV section (k_tile, v_tile are KERNEL_BLOCK_N1_BWD x D_head)
+    // qT_tile for dK/dV is KERNEL_BLOCK_M1_BWD x D_head (then transposed)
+    // do_tile for dK/dV is KERNEL_BLOCK_M1_BWD x D_head
+    __shared__ __half k_shared_dkdv[KERNEL_BLOCK_N1_BWD][KERNEL_MAX_D_HEAD];
+    __shared__ __half v_shared_dkdv[KERNEL_BLOCK_N1_BWD][KERNEL_MAX_D_HEAD];
+    __shared__ __half qT_shared_dkdv[KERNEL_BLOCK_M1_BWD][KERNEL_MAX_D_HEAD]; // For Q tile
+    __shared__ __half do_shared_dkdv[KERNEL_BLOCK_M1_BWD][KERNEL_MAX_D_HEAD]; // For dO tile
+    // Accumulators for dK, dV
+    __shared__ float dk_acc[KERNEL_BLOCK_N1_BWD][KERNEL_MAX_D_HEAD]; // Accumulate in float
+    __shared__ float dv_acc[KERNEL_BLOCK_N1_BWD][KERNEL_MAX_D_HEAD];
+
+    // For dQ section (q_tile, do_tile are KERNEL_BLOCK_M2_BWD x D_head)
+    // kT_tile, vT_tile for dQ are KERNEL_BLOCK_N2_BWD x D_head (then transposed)
+    __shared__ __half q_shared_dq[KERNEL_BLOCK_M2_BWD][KERNEL_MAX_D_HEAD];
+    __shared__ __half do_shared_dq[KERNEL_BLOCK_M2_BWD][KERNEL_MAX_D_HEAD];
+    __shared__ __half kT_shared_dq[KERNEL_BLOCK_N2_BWD][KERNEL_MAX_D_HEAD]; // For K tile
+    __shared__ __half vT_shared_dq[KERNEL_BLOCK_N2_BWD][KERNEL_MAX_D_HEAD]; // For V tile
+    // Accumulator for dQ
+    __shared__ float dq_acc[KERNEL_BLOCK_M2_BWD][KERNEL_MAX_D_HEAD]; // Accumulate in float
+    
+    // Shared memory for LSE (M) and Delta (D) tiles if needed block-wide
+    // These are [seq_len] dimensioned.
+    // __shared__ float lse_tile_dq[KERNEL_BLOCK_M2_BWD]; // For Q tile related LSE
+    // __shared__ float delta_tile_dq[KERNEL_BLOCK_M2_BWD]; // For Q tile related Delta
+    // __shared__ float lse_tile_dkdv[KERNEL_BLOCK_M1_BWD]; // For Q tile related LSE for dk/dv
+    // __shared__ float delta_tile_dkdv[KERNEL_BLOCK_M1_BWD]; // For Q tile related Delta for dk/dv
+
+
+    // =======================================================================
+    // Section 1: Compute dK and dV (corresponds to first part of Triton _attn_bwd)
+    // This section's primary output tile is for dK and dV at start_n_kv_tile.
+    // It iterates over blocks of Q.
+    // =======================================================================
+    { // Scope for dK/dV variables
+        const int start_n_kv_this_block = seq_tile_idx * KERNEL_BLOCK_N1_BWD;
+
+        // Initialize dk_acc and dv_acc to 0.0f using threads
+        // (Details in next subtask)
+
+        // Load K tile (k_shared_dkdv) for start_n_kv_this_block
+        // Load V tile (v_shared_dkdv) for start_n_kv_this_block
+        // (Details in next subtask)
+        // __syncthreads();
+
+        // Loop over Q sequence by KERNEL_BLOCK_M1_BWD tiles (Triton's curr_m loop)
+        // This loop structure is based on Triton's _attn_bwd_dkdv inner loop.
+        // First part of loop: MASK=True (diagonal and nearby Q blocks)
+        // int num_steps_masked = KERNEL_BLOCK_N1_BWD / (KERNEL_BLOCK_M1_BWD / KERNEL_BLK_SLICE_FACTOR_BWD);
+        // int q_start_m_masked_loop = start_n_kv_this_block; // Aligned with K/V tile for causal start
+        // for (int q_tile_iter = 0; q_tile_iter < num_steps_masked; ++q_tile_iter) {
+        //    int current_q_block_start_row = q_start_m_masked_loop + q_tile_iter * (KERNEL_BLOCK_M1_BWD / KERNEL_BLK_SLICE_FACTOR_BWD);
+        //    bool apply_mask = true;
+        //    // Call or inline _attn_bwd_dkdv_logic(dk_acc, dv_acc, ..., apply_mask);
+        // }
+        // Second part of loop: MASK=False (remaining Q blocks)
+        // int q_start_m_unmasked_loop = q_start_m_masked_loop + num_steps_masked * (KERNEL_BLOCK_M1_BWD / KERNEL_BLK_SLICE_FACTOR_BWD);
+        // for (int current_q_block_start_row = q_start_m_unmasked_loop; current_q_block_start_row < N_q; current_q_block_start_row += KERNEL_BLOCK_M1_BWD) {
+        //    bool apply_mask = false;
+        //    // Call or inline _attn_bwd_dkdv_logic(dk_acc, dv_acc, ..., apply_mask);
+        // }
+        // __syncthreads(); // After all Q blocks processed for this K/V tile
+
+        // Store final dk_acc and dv_acc to global dk_bh_ptr and dv_bh_ptr at start_n_kv_this_block
+        // Remember dk needs scaling: dk_val * sm_scale
+        // (Details in next subtask)
     }
-    // This is a placeholder. A full implementation is complex.
+
+
+    // =======================================================================
+    // Section 2: Compute dQ (corresponds to second part of Triton _attn_bwd)
+    // This section's primary output tile is for dQ at start_m_q_tile.
+    // It iterates over blocks of K/V.
+    // =======================================================================
+    // __syncthreads(); // Ensure dK/dV writes are done if same block does both (not current grid)
+                       // The current grid implies a block does EITHER dK/dV OR dQ based on its blockIdx.x
+                       // relative to N_CTX / KERNEL_BLOCK_N1_BWD vs N_CTX / KERNEL_BLOCK_M2_BWD.
+                       // For simplicity, assume one kernel does both for now, like Triton _attn_bwd.
+                       // This means seq_tile_idx is used for both start_n_kv_this_block and start_m_q_this_block.
+
+    { // Scope for dQ variables
+        const int start_m_q_this_block = seq_tile_idx * KERNEL_BLOCK_M2_BWD;
+
+        // Initialize dq_acc to 0.0f using threads
+        // (Details in next subtask)
+
+        // Load Q tile (q_shared_dq) for start_m_q_this_block
+        // Load dO tile (do_shared_dq) for start_m_q_this_block
+        // Load LSE tile (lse_tile_dq) for start_m_q_this_block (from lse_bh_ptr)
+        // Load Delta tile (delta_tile_dq) for start_m_q_this_block (from delta_bh_ptr)
+        // (Details in next subtask)
+        // __syncthreads();
+        
+        // Loop over K/V sequence by KERNEL_BLOCK_N2_BWD tiles (Triton's curr_n loop)
+        // Similar to dK/dV, handle MASK=True and MASK=False sections.
+        // int end_n_for_masked_loop = start_m_q_this_block + KERNEL_BLOCK_M2_BWD; 
+        // ... loop structure from Triton ...
+        // for (int kv_tile_iter = 0; ...) {
+        //    int current_kv_block_start_row = ...;
+        //    bool apply_mask = ...;
+        //    // Call or inline _attn_bwd_dq_logic(dq_acc, ..., apply_mask);
+        // }
+        // __syncthreads();
+
+        // Store final dq_acc to global dq_bh_ptr at start_m_q_this_block
+        // Remember dQ needs scaling: dq_val * LN2 (log(2.0f))
+        // (Details in next subtask)
+    }
+
+    if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
+        // printf("flash_bwd_kernel: Structured skeleton executed.
+");
+    }
+}
+
+__global__ void flash_bwd_preprocess_kernel(
     // It would involve:
     // 1. Recomputing attention scores (or using saved ones if memory allows, though Flash Attention aims to avoid this).
     // 2. Calculating dP = dO V^T.

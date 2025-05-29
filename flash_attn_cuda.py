@@ -1,3 +1,4 @@
+import math # Added import
 import sys
 import os
 
@@ -114,12 +115,24 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
             print(f"!!! flash_attn_cuda.py: ERROR during preprocess_backward call: {e_pre} !!!")
             raise
 
+        # --- Pre-scale K tensor ---
+        RCP_LN2 = 1.4426950408889634  # 1.0 / math.log(2.0)
+        # k is from ctx.saved_tensors, sm_scale from ctx.sm_scale
+        # PyTorch handles mixed type operations; k is float16, (sm_scale * RCP_LN2) is float64/float32.
+        # The result arg_k should be float16.
+        arg_k = k * (sm_scale * RCP_LN2)
+        if not arg_k.is_contiguous(): # Ensure contiguity for arg_k
+            arg_k = arg_k.contiguous()
+        # Assuming arg_k will be float16 if k is float16.
+        # if arg_k.dtype != torch.float16:
+        #    arg_k = arg_k.to(torch.float16) # This should not be needed
+
         # --- Call Main Backward Kernel ---
-        # Now pass delta to the main backward function
+        # Pass pre-scaled arg_k instead of original k
         print("flash_attn_cuda.py: Calling main backward...") # Diagnostic print
         try:
             dq, dk, dv = flash_attn_cuda_kernels.backward(
-                dout, q, k, v, o, softmax_lse, 
+                dout, q, arg_k, v, o, softmax_lse, 
                 delta, # Pass the newly computed delta
                 sm_scale, causal
             )
