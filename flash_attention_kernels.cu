@@ -499,8 +499,7 @@ __global__ void flash_bwd_kernel(
     }
 
     if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
-        // printf("flash_bwd_kernel: Structured skeleton executed.
-");
+        // printf("flash_bwd_kernel: Structured skeleton executed.\\n");
     }
 }
 
