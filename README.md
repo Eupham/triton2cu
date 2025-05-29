@@ -17,15 +17,17 @@ This project provides a framework for implementing Flash Attention using custom 
 
 ## Build Instructions
 
-To build the custom CUDA extension for development and local testing, navigate to the root directory of this project in your terminal and run:
+To ensure a clean build, especially if you have made changes or built previously, it's recommended to first clean any old build artifacts. Then, to build the custom CUDA extension for development and local testing, navigate to the root directory of this project in your terminal and run:
 
 ```bash
+python setup.py clean --all
 python setup.py build_ext --inplace
 ```
-This command builds the extension module (e.g., `flash_attn_cuda_kernels.cpython-XYZ.so`) directly into your current working directory. This is often the most straightforward way to ensure your local Python scripts (like `benchmark.py`) can find and import the compiled module.
+This command sequence first cleans up previous build outputs and then builds the extension module (e.g., `flash_attn_cuda_kernels.cpython-XYZ.so`) directly into your current working directory. This is often the most straightforward way to ensure your local Python scripts (like `benchmark.py`) can find and import the compiled module.
 
 Alternatively, to install the module more permanently into your Python environment (e.g., into `site-packages`), you can run:
 ```bash
+python setup.py clean --all
 python setup.py install
 ```
 
