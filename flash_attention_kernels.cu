@@ -1,6 +1,7 @@
 // flash_attention_kernels.cu
 
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h> // Added header
 #include <cuda_runtime.h>
 #include <cuda_fp16.h> // For __half
 #include <vector>
