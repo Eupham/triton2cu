@@ -7,8 +7,8 @@ import torch # Added import
 setup_dir = os.path.dirname(os.path.realpath(__file__))
 kernel_file = os.path.join(setup_dir, "flash_attention_kernels.cu")
 
-# Get PyTorch's library path
-torch_lib_path = torch.get_lib_path()
+# Get PyTorch's library path using cmake_prefix_path
+torch_lib_path = os.path.join(torch.utils.cpp_extension.cmake_prefix_path, 'lib') # Changed line
 
 setup(
     name='flash_attn_cuda_kernels', # Name of the Python package
