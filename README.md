@@ -17,21 +17,22 @@ This project provides a framework for implementing Flash Attention using custom 
 
 ## Build Instructions
 
-To build the custom CUDA extension, navigate to the root directory of this project in your terminal and run:
-
-```bash
-python setup.py install
-```
-
-Alternatively, for development, you can build the extension in-place:
+To build the custom CUDA extension for development and local testing, navigate to the root directory of this project in your terminal and run:
 
 ```bash
 python setup.py build_ext --inplace
 ```
+This command builds the extension module (e.g., `flash_attn_cuda_kernels.cpython-XYZ.so`) directly into your current working directory. This is often the most straightforward way to ensure your local Python scripts (like `benchmark.py`) can find and import the compiled module.
 
-This will compile `flash_attention_kernels.cu` and create a Python module (e.g., in a `build` directory and/or installing it into your Python environment) that can be imported as `flash_attn_cuda_kernels`.
+Alternatively, to install the module more permanently into your Python environment (e.g., into `site-packages`), you can run:
+```bash
+python setup.py install
+```
 
-If the build is successful, you should be able to import the custom module in Python, e.g., `import flash_attn_cuda_kernels`.
+After a successful build (either inplace or via install), you should be able to import the custom module in Python from a script in the root directory (for inplace build) or from anywhere (for install):
+`import flash_attn_cuda_kernels`
+
+If you encounter issues importing the module after building, ensure that the directory containing the compiled `.so` file is part of your Python path, or that you are running your script from a location where the module is visible (especially after an inplace build).
 
 ## Running Benchmarks
 
