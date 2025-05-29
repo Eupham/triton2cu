@@ -306,60 +306,6 @@ __global__ void flash_fwd_kernel(
     // as threads are writing to distinct global memory locations for their assigned Q row.
 }
 
-torch::Tensor flash_bwd_preprocess_cuda(
-    torch::Tensor o,    // Output tensor from forward pass [B, H, N_CTX, D_head]
-    torch::Tensor dout  // Gradient dO [B, H, N_CTX, D_head]
-) {
-    // Input validation (basic checks)
-    TORCH_CHECK(o.device().is_cuda(), "Input O must be a CUDA tensor");
-    TORCH_CHECK(dout.device().is_cuda(), "Input dO must be a CUDA tensor");
-    TORCH_CHECK(o.is_contiguous(), "Input O must be contiguous");
-    TORCH_CHECK(dout.is_contiguous(), "Input dO must be contiguous");
-    TORCH_CHECK(o.scalar_type() == torch::kFloat16, "Input O must be FP16");
-    TORCH_CHECK(dout.scalar_type() == torch::kFloat16, "Input dO must be FP16");
-    TORCH_CHECK(o.sizes() == dout.sizes(), "O and dO must have the same sizes");
-
-    const int B = o.size(0);
-    const int H = o.size(1);
-    const int N_CTX = o.size(2);
-    const int D_head = o.size(3);
-
-    // Allocate the output Delta tensor: [B, H, N_CTX], dtype float32
-    auto delta_options = o.options().dtype(torch::kFloat32);
-    torch::Tensor delta = torch::empty({B, H, N_CTX}, delta_options);
-
-    // Kernel launch configuration
-    dim3 threads(KERNEL_PRE_BLOCK); 
-    dim3 blocks(
-        (N_CTX + KERNEL_PRE_BLOCK - 1) / KERNEL_PRE_BLOCK, 
-        B * H                                             
-    );
-
-    // Get data pointers
-    const __half* o_ptr_in = reinterpret_cast<const __half*>(o.data_ptr()); // Renamed to avoid conflict
-    const __half* do_ptr_in = reinterpret_cast<const __half*>(dout.data_ptr()); // Renamed to avoid conflict
-    float* delta_ptr_out = delta.data_ptr<float>(); // Renamed to avoid conflict
-
-    // Get current CUDA stream from PyTorch
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-    // Launch the kernel
-    flash_bwd_preprocess_kernel<<<blocks, threads, 0, stream>>>(
-        o_ptr_in, do_ptr_in, delta_ptr_out,
-        B, H, N_CTX, D_head
-    );
-
-    // Check for kernel launch errors
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        fprintf(stderr, "CUDA Kernel Launch Error in flash_bwd_preprocess_cuda: %s\n", cudaGetErrorString(err));
-        // Consider throwing an exception here for PyTorch to catch
-        TORCH_CHECK(false, "CUDA kernel launch failed in flash_bwd_preprocess_cuda: ", cudaGetErrorString(err));
-    }
-
-    return delta;
-}
-
 // Placeholder for the actual CUDA kernel for the backward pass
 // This kernel would perform the core Flash Attention backward computation.
 __global__ void flash_bwd_kernel(
@@ -441,6 +387,60 @@ __global__ void flash_bwd_preprocess_kernel(
         // Flat index for Delta: bh_idx * N_CTX + global_token_idx
         delta_ptr[bh_idx * N_CTX + global_token_idx] = sum_o_do;
     }
+}
+
+torch::Tensor flash_bwd_preprocess_cuda(
+    torch::Tensor o,    // Output tensor from forward pass [B, H, N_CTX, D_head]
+    torch::Tensor dout  // Gradient dO [B, H, N_CTX, D_head]
+) {
+    // Input validation (basic checks)
+    TORCH_CHECK(o.device().is_cuda(), "Input O must be a CUDA tensor");
+    TORCH_CHECK(dout.device().is_cuda(), "Input dO must be a CUDA tensor");
+    TORCH_CHECK(o.is_contiguous(), "Input O must be contiguous");
+    TORCH_CHECK(dout.is_contiguous(), "Input dO must be contiguous");
+    TORCH_CHECK(o.scalar_type() == torch::kFloat16, "Input O must be FP16");
+    TORCH_CHECK(dout.scalar_type() == torch::kFloat16, "Input dO must be FP16");
+    TORCH_CHECK(o.sizes() == dout.sizes(), "O and dO must have the same sizes");
+
+    const int B = o.size(0);
+    const int H = o.size(1);
+    const int N_CTX = o.size(2);
+    const int D_head = o.size(3);
+
+    // Allocate the output Delta tensor: [B, H, N_CTX], dtype float32
+    auto delta_options = o.options().dtype(torch::kFloat32);
+    torch::Tensor delta = torch::empty({B, H, N_CTX}, delta_options);
+
+    // Kernel launch configuration
+    dim3 threads(KERNEL_PRE_BLOCK); 
+    dim3 blocks(
+        (N_CTX + KERNEL_PRE_BLOCK - 1) / KERNEL_PRE_BLOCK, 
+        B * H                                             
+    );
+
+    // Get data pointers
+    const __half* o_ptr_in = reinterpret_cast<const __half*>(o.data_ptr()); // Renamed to avoid conflict
+    const __half* do_ptr_in = reinterpret_cast<const __half*>(dout.data_ptr()); // Renamed to avoid conflict
+    float* delta_ptr_out = delta.data_ptr<float>(); // Renamed to avoid conflict
+
+    // Get current CUDA stream from PyTorch
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    // Launch the kernel
+    flash_bwd_preprocess_kernel<<<blocks, threads, 0, stream>>>(
+        o_ptr_in, do_ptr_in, delta_ptr_out,
+        B, H, N_CTX, D_head
+    );
+
+    // Check for kernel launch errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Kernel Launch Error in flash_bwd_preprocess_cuda: %s\n", cudaGetErrorString(err));
+        // Consider throwing an exception here for PyTorch to catch
+        TORCH_CHECK(false, "CUDA kernel launch failed in flash_bwd_preprocess_cuda: ", cudaGetErrorString(err));
+    }
+
+    return delta;
 }
 
 std::vector<torch::Tensor> flash_attn_forward_cuda(
