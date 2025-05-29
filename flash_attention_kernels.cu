@@ -11,6 +11,7 @@
 // Define fixed tile sizes for the kernel compilation
 #define KERNEL_BLOCK_M 64
 #define KERNEL_BLOCK_N 64
+#define KERNEL_MAX_D_HEAD 128 // Max head dimension supported by shared memory
 
 __global__ void flash_fwd_kernel(
     const __half* __restrict__ q_ptr,    // Query tensor [B, H, N_q, D_head]
@@ -46,9 +47,9 @@ __global__ void flash_fwd_kernel(
     // const int lane_id = tidx % 32;
 
     // Shared memory for tiles (using defines)
-    __shared__ __half q_tile[KERNEL_BLOCK_M][D_head];
-    __shared__ __half k_tile[KERNEL_BLOCK_N][D_head];
-    __shared__ __half v_tile[KERNEL_BLOCK_N][D_head];
+    __shared__ __half q_tile[KERNEL_BLOCK_M][KERNEL_MAX_D_HEAD];
+    __shared__ __half k_tile[KERNEL_BLOCK_N][KERNEL_MAX_D_HEAD];
+    __shared__ __half v_tile[KERNEL_BLOCK_N][KERNEL_MAX_D_HEAD];
 
     // Online Softmax Accumulators (per thread, for its assigned Q row m)
     // Assumes blockDim.x == KERNEL_BLOCK_M, so threadIdx.x maps directly to a row in q_tile.
@@ -72,7 +73,7 @@ __global__ void flash_fwd_kernel(
         if (q_start_row_idx + row < N_q) { // Boundary check for Q sequence
             ((__half*)q_tile)[row * D_head + col] = q_batch_head_ptr[(q_start_row_idx + row) * D_head + col];
         } else {
-            ((__half*)q_tile)[row * D_head + col] = static_cast<__half>(0.0f); // Padding
+            ((__half*)q_tile)[row * D_head + col] = __float2half(0.0f); // Padding
         }
     }
     __syncthreads(); // Ensure Q tile is loaded before use
@@ -105,7 +106,7 @@ __global__ void flash_fwd_kernel(
                 if (start_n_kv + row < N_kv) { // Boundary check for K sequence
                     ((__half*)k_tile)[row * D_head + col] = k_batch_head_ptr[(start_n_kv + row) * D_head + col];
                 } else {
-                    ((__half*)k_tile)[row * D_head + col] = static_cast<__half>(0.0f); // Padding
+                    ((__half*)k_tile)[row * D_head + col] = __float2half(0.0f); // Padding
                 }
             }
             // Load V tile into shared memory (v_tile[KERNEL_BLOCK_N][D_head])
@@ -115,7 +116,7 @@ __global__ void flash_fwd_kernel(
                 if (start_n_kv + row < N_kv) { // Boundary check for V sequence
                     ((__half*)v_tile)[row * D_head + col] = v_batch_head_ptr[(start_n_kv + row) * D_head + col];
                 } else {
-                    ((__half*)v_tile)[row * D_head + col] = static_cast<__half>(0.0f); // Padding
+                    ((__half*)v_tile)[row * D_head + col] = __float2half(0.0f); // Padding
                 }
             }
             __syncthreads(); // Ensure K and V tiles are loaded
@@ -190,7 +191,7 @@ __global__ void flash_fwd_kernel(
             if (start_n_kv + row < N_kv) { // Boundary check for K sequence
                 ((__half*)k_tile)[row * D_head + col] = k_batch_head_ptr[(start_n_kv + row) * D_head + col];
             } else {
-                ((__half*)k_tile)[row * D_head + col] = static_cast<__half>(0.0f); // Padding
+                    ((__half*)k_tile)[row * D_head + col] = __float2half(0.0f); // Padding
             }
         }
         // Load V tile into shared memory (v_tile[KERNEL_BLOCK_N][D_head])
@@ -200,7 +201,7 @@ __global__ void flash_fwd_kernel(
             if (start_n_kv + row < N_kv) { // Boundary check for V sequence
                 ((__half*)v_tile)[row * D_head + col] = v_batch_head_ptr[(start_n_kv + row) * D_head + col];
             } else {
-                ((__half*)v_tile)[row * D_head + col] = static_cast<__half>(0.0f); // Padding
+                    ((__half*)v_tile)[row * D_head + col] = __float2half(0.0f); // Padding
             }
         }
         __syncthreads(); // Ensure K and V tiles are loaded
