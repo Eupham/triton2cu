@@ -36,8 +36,8 @@ __global__ void flash_fwd_kernel(
     // BLOCK_M_KERNEL and BLOCK_N_KERNEL removed from parameters
 ) {
     // --- Thread and Block Indexing ---
-    const int q_block_idx_m = blockIdx.x; 
-    const int bh_idx = blockIdx.y;       
+    const int q_block_idx_m = blockIdx.x;
+    const int bh_idx = blockIdx.y;
 
     const int current_batch = bh_idx / H;
     const int current_head = bh_idx % H;
@@ -67,14 +67,14 @@ __global__ void flash_fwd_kernel(
             }
         }
     }
-    __syncthreads(); 
+    __syncthreads();
 
     // --- Softmax Accumulator Initialization (Per-thread for Q-row m) ---
-    float m_i = -INFINITY; 
-    float l_i = 1.0f;    
-    float acc[KERNEL_MAX_D_HEAD]; 
-    
-    for (int d_acc = 0; d_acc < D_head; ++d_acc) { 
+    float m_i = -INFINITY;
+    float l_i = 1.0f;
+    float acc[KERNEL_MAX_D_HEAD];
+
+    for (int d_acc = 0; d_acc < D_head; ++d_acc) {
         acc[d_acc] = 0.0f;
     }
 
@@ -118,7 +118,7 @@ __global__ void flash_fwd_kernel(
 
             // --- QK^T computation and online softmax update (Step 3c) ---
             float qk_tile_row_loop1[KERNEL_BLOCK_N]; // Renamed from qk_tile_row for clarity
-            
+
             if (m < KERNEL_BLOCK_M) { // Thread active for a Q row
                 // Compute QK^T for the current Q row (m) and all K rows in k_tile
                 for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
@@ -147,15 +147,15 @@ __global__ void flash_fwd_kernel(
 
                 // 2. Calculate new_m_i and handle fully masked rows
                 float new_m_i_loop1; // Renamed for clarity
-                if (current_row_max_qk == -INFINITY) { 
-                    new_m_i_loop1 = m_i; 
+                if (current_row_max_qk == -INFINITY) {
+                    new_m_i_loop1 = m_i;
                 } else {
                     new_m_i_loop1 = fmaxf(m_i, current_row_max_qk);
                 }
 
                 // 3. Calculate P_ij values and sum for l_ij (p_sum_numerator)
                 float p_sum_numerator_loop1 = 0.0f;
-                __half p_ij_row_loop1[KERNEL_BLOCK_N]; 
+                __half p_ij_row_loop1[KERNEL_BLOCK_N];
 
                 for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
                     if (current_row_max_qk == -INFINITY) {
@@ -166,7 +166,7 @@ __global__ void flash_fwd_kernel(
                     }
                     p_sum_numerator_loop1 += __half2float(p_ij_row_loop1[n]);
                 }
-                
+
                 // 4. Calculate alpha
                 float alpha_loop1 = exp2f(m_i - new_m_i_loop1);
 
@@ -177,20 +177,20 @@ __global__ void flash_fwd_kernel(
 
                 // 6. Accumulate P.V
                 if (current_row_max_qk != -INFINITY) { // Only if row not fully masked
-                    for (int d_acc = 0; d_acc < D_head; ++d_acc) { 
+                    for (int d_acc = 0; d_acc < D_head; ++d_acc) {
                         float pv_sum_d = 0.0f;
-                        for (int n = 0; n < KERNEL_BLOCK_N; ++n) { 
+                        for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
                             pv_sum_d += __half2float(p_ij_row_loop1[n]) * __half2float(v_tile[n][d_acc]);
                         }
                         acc[d_acc] += pv_sum_d;
                     }
                 }
-                
+
                 // 7. Update l_i and m_i
                 l_i = l_i * alpha_loop1 + p_sum_numerator_loop1;
                 m_i = new_m_i_loop1;
             } // end if (m < KERNEL_BLOCK_M)
-            
+
             __syncthreads(); // Sync before next K/V iteration
         }
     }
@@ -242,14 +242,14 @@ __global__ void flash_fwd_kernel(
             }
 
             // Apply intra-block causal mask
-            if (is_causal && start_n_kv == q_start_row_idx) { 
+            if (is_causal && start_n_kv == q_start_row_idx) {
                 for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
-                    if (m < n) { 
-                        qk_tile_row_loop2[n] = -INFINITY; 
+                    if (m < n) {
+                        qk_tile_row_loop2[n] = -INFINITY;
                     }
                 }
             }
-            
+
             // --- Online Softmax Update (Step 3d) ---
             // 1. Find current_row_max_qk from qk_tile_row_loop2
             float current_row_max_qk = -INFINITY;
@@ -261,15 +261,15 @@ __global__ void flash_fwd_kernel(
 
             // 2. Calculate new_m_i and handle fully masked rows
             float new_m_i_loop2; // Renamed for clarity
-            if (current_row_max_qk == -INFINITY) { 
-                new_m_i_loop2 = m_i; 
+            if (current_row_max_qk == -INFINITY) {
+                new_m_i_loop2 = m_i;
             } else {
                 new_m_i_loop2 = fmaxf(m_i, current_row_max_qk);
             }
 
             // 3. Calculate P_ij values and sum for l_ij
             float p_sum_numerator_loop2 = 0.0f;
-            __half p_ij_row_loop2[KERNEL_BLOCK_N]; 
+            __half p_ij_row_loop2[KERNEL_BLOCK_N];
 
             for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
                 if (current_row_max_qk == -INFINITY) {
@@ -280,7 +280,7 @@ __global__ void flash_fwd_kernel(
                 }
                 p_sum_numerator_loop2 += __half2float(p_ij_row_loop2[n]);
             }
-            
+
             // 4. Calculate alpha
             float alpha_loop2 = exp2f(m_i - new_m_i_loop2);
 
@@ -291,20 +291,20 @@ __global__ void flash_fwd_kernel(
 
             // 6. Accumulate P.V
             if (current_row_max_qk != -INFINITY) { // Only if row not fully masked
-                for (int d_acc = 0; d_acc < D_head; ++d_acc) { 
+                for (int d_acc = 0; d_acc < D_head; ++d_acc) {
                     float pv_sum_d = 0.0f;
-                    for (int n = 0; n < KERNEL_BLOCK_N; ++n) { 
+                    for (int n = 0; n < KERNEL_BLOCK_N; ++n) {
                         pv_sum_d += __half2float(p_ij_row_loop2[n]) * __half2float(v_tile[n][d_acc]);
                     }
                     acc[d_acc] += pv_sum_d;
                 }
             }
-            
+
             // 7. Update l_i and m_i
             l_i = l_i * alpha_loop2 + p_sum_numerator_loop2;
             m_i = new_m_i_loop2;
         } // end if (m < KERNEL_BLOCK_M)
-        
+
         __syncthreads(); // Sync before next K/V iteration
     }
 
@@ -319,16 +319,16 @@ __global__ void flash_fwd_kernel(
             // 1. Finalize LSE value for this Q row
             float final_lse_val;
             if (l_i <= 0.0f || l_i != l_i) { // Check for zero, negative, or NaN l_i
-                final_lse_val = -INFINITY; 
+                final_lse_val = -INFINITY;
             } else {
                 final_lse_val = m_i + log2f(l_i);
             }
-            
+
             // Store softmax_lse for this Q row
             softmax_lse_ptr[bh_idx * N_q + (q_start_row_idx + m)] = final_lse_val;
 
             // 2. Finalize Output O values for this Q row
-            float inv_l_i = (l_i == 0.0f || l_i != l_i) ? 0.0f : 1.0f / l_i; 
+            float inv_l_i = (l_i == 0.0f || l_i != l_i) ? 0.0f : 1.0f / l_i;
 
             __half* o_row_global_ptr = o_ptr + (bh_idx * N_q + (q_start_row_idx + m)) * D_head;
             for (int d = 0; d < D_head; ++d) {
@@ -405,7 +405,7 @@ std::vector<torch::Tensor> flash_attn_forward_cuda(
     const int B = q.size(0);
     const int H = q.size(1);
     const int N_q = q.size(2);
-    const int D_head = q.size(3); 
+    const int D_head = q.size(3);
 
     torch::Tensor o_dummy = torch::empty({B, H, N_q, D_head}, q.options());
     torch::Tensor softmax_lse_dummy = torch::empty({B, H, N_q}, q.options().dtype(torch::kFloat32));
@@ -486,15 +486,15 @@ std::vector<torch::Tensor> flash_attn_backward_cuda(
     __half* dq_ptr_out = reinterpret_cast<__half*>(dq.data_ptr());
     __half* dk_ptr_out = reinterpret_cast<__half*>(dk.data_ptr());
     __half* dv_ptr_out = reinterpret_cast<__half*>(dv.data_ptr());
-    
+
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    
+
     // Update kernel launch call to include delta_ptr
     flash_bwd_kernel<<<blocks, threads, 0, stream>>>(
         dout_ptr_in, q_ptr_in, k_ptr_in, v_ptr_in, o_ptr_in, softmax_lse_ptr_in,
         delta_ptr_in, // Pass new delta_ptr
         dq_ptr_out, dk_ptr_out, dv_ptr_out,
-        B, H, N_q, N_kv, D_head, 
+        B, H, N_q, N_kv, D_head,
         sm_scale, causal
     );
     cudaError_t err_bwd = cudaGetLastError();

@@ -54,7 +54,7 @@ def run_benchmark(BATCH, H, N_CTX, HEAD_DIM, causal, device=DEVICE):
     if q.grad is not None: q.grad.zero_()
     if k.grad is not None: k.grad.zero_()
     if v.grad is not None: v.grad.zero_()
-    
+
     # Warmup
     custom_out_warmup = flash_attention_cuda(q, k, v, sm_scale, causal)
     torch.cuda.synchronize()
@@ -73,7 +73,7 @@ def run_benchmark(BATCH, H, N_CTX, HEAD_DIM, causal, device=DEVICE):
     if k.grad is not None: k.grad.zero_()
     if v.grad is not None: v.grad.zero_()
     torch.cuda.synchronize()
-    
+
     start_time_bwd_custom = time.time()
     custom_out.backward(dout, retain_graph=True)
     torch.cuda.synchronize() # Wait for GPU to finish
@@ -85,7 +85,7 @@ def run_benchmark(BATCH, H, N_CTX, HEAD_DIM, causal, device=DEVICE):
     custom_dk, k.grad = k.grad.clone(), None
     custom_dv, v.grad = v.grad.clone(), None
 
-    
+
     # --- PyTorch nn.MultiheadAttention Implementation ---
     print("\n--- PyTorch nn.MultiheadAttention ---")
     # Reset grads for PyTorch MHA section
@@ -154,8 +154,8 @@ def run_benchmark(BATCH, H, N_CTX, HEAD_DIM, causal, device=DEVICE):
     print("\n--- Accuracy Comparison (Custom CUDA vs PyTorch MHA) ---")
     # We use a relatively high tolerance due to potential differences in implementation details (e.g. exact softmax computation)
     # and fp16 arithmetic. The custom CUDA kernels are placeholders and will output zeros.
-    atol = 1e-2 
-    rtol = 1e-2 
+    atol = 1e-2
+    rtol = 1e-2
 
     outputs_match = torch.allclose(custom_out, mha_out_reshaped, atol=atol, rtol=rtol)
     print(f"Forward outputs match: {outputs_match}")
@@ -179,7 +179,7 @@ def run_benchmark(BATCH, H, N_CTX, HEAD_DIM, causal, device=DEVICE):
         print("Max diff in dK gradients:", (custom_dk - mha_dk).abs().max().item())
         # print("Custom dK sample:", custom_dk[0,0,0,:5])
         # print("MHA dK sample:", mha_dk[0,0,0,:5])
-        
+
     dv_match = torch.allclose(custom_dv, mha_dv, atol=atol, rtol=rtol)
     print(f"dV gradients match: {dv_match}")
     if not dv_match:
@@ -229,7 +229,7 @@ if __name__ == "__main__":
         # Test with different head dimensions
         # print("\nRunning configurations with different head dimensions...")
         # run_benchmark(BATCH=2, H=4, N_CTX=512, HEAD_DIM=128, causal=True, device=DEVICE)
-    
+
     if not FLASH_CUDA_AVAILABLE and not TRITON_AVAILABLE and DEVICE == 'cuda':
         print("\nNote: Neither Custom CUDA nor Triton Flash Attention modules were found.")
         print("The benchmark compared PyTorch MHA against (non-functional) placeholders for the custom CUDA version.")

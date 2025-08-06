@@ -76,7 +76,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         ctx.save_for_backward(q, k, v, o, softmax_lse)
         ctx.sm_scale = sm_scale
         ctx.causal = causal
-        
+
         return o
 
     @staticmethod
@@ -86,7 +86,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         if not dout.is_cuda:
             raise ValueError("dout must be a CUDA tensor")
         if not dout.is_contiguous(): # Important for CUDA
-            dout = dout.contiguous() 
+            dout = dout.contiguous()
         if dout.dtype != torch.float16:
             # Consider casting: dout = dout.to(torch.float16)
             raise ValueError("dout must be of dtype torch.float16")
@@ -104,7 +104,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
             o = o.contiguous()
         if o.dtype != torch.float16:
             # This should not happen if forward pass output o is float16
-            # o = o.to(torch.float16) 
+            # o = o.to(torch.float16)
             pass # Assuming o is already float16 from forward
 
         print("flash_attn_cuda.py: Calling preprocess_backward...") # Diagnostic print
@@ -132,7 +132,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         print("flash_attn_cuda.py: Calling main backward...") # Diagnostic print
         try:
             dq, dk, dv = flash_attn_cuda_kernels.backward(
-                dout, q, arg_k, v, o, softmax_lse, 
+                dout, q, arg_k, v, o, softmax_lse,
                 delta, # Pass the newly computed delta
                 sm_scale, causal
             )
@@ -140,7 +140,7 @@ class FlashAttentionCUDAFunction(torch.autograd.Function):
         except Exception as e_main:
             print(f"!!! flash_attn_cuda.py: ERROR during main backward call: {e_main} !!!")
             raise
-            
+
         # Gradients for q, k, v. No gradients for sm_scale, causal.
         # The forward inputs were: q, k, v, sm_scale, causal
         # So we need to return grads for these 5.
